@@ -1,0 +1,79 @@
+name: Build Sonara App
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish as a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: |
+          [ -f SonaraApp.zip ] || { echo "SonaraApp.zip is missing from the repo root"; ls; exit 1; }
+          mkdir -p "$RUNNER_TEMP/app"
+          unzip -q SonaraApp.zip -d "$RUNNER_TEMP/app"
+          SETTINGS=$(find "$RUNNER_TEMP/app" -name settings.gradle.kts | head -n 1)
+          [ -n "$SETTINGS" ] || { echo "No settings.gradle.kts inside SonaraApp.zip"; exit 1; }
+          echo "SRC_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Accept Android SDK licenses
+        run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null
+
+      - name: Use the saved signing key
+        env:
+          KS: ${{ secrets.SONARA_KEYSTORE_B64 }}
+        run: |
+          mkdir -p ~/.android
+          if [ -n "$KS" ]; then
+            echo "$KS" | base64 -d > ~/.android/debug.keystore
+            echo "Using the saved signing key"
+          else
+            echo "::warning::No SONARA_KEYSTORE_B64 secret. This APK gets a random key and cannot update an earlier install."
+          fi
+
+      - name: Build APK
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          gradle assembleDebug --stacktrace \
+            -PsonaraCode=${{ github.run_number }} \
+            -PsonaraName=1.0.${{ github.run_number }}
+          mkdir -p "$RUNNER_TEMP/out"
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/out/Sonara-1.0.${{ github.run_number }}.apk"
+          echo "OUT_DIR=$RUNNER_TEMP/out" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonara-APK
+          path: ${{ env.OUT_DIR }}/*.apk
+
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v1.0.${{ github.run_number }}" "$OUT_DIR"/*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Sonara 1.0.${{ github.run_number }}" \
+            --notes "Sonara by TARXS Industries, build ${{ github.run_number }}."
